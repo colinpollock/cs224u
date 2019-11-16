@@ -11,28 +11,11 @@ nltk>=3.4.0
 python-dateutil>=2.7.0
 pytest>=4.0.0
 jupyter>=1.0.0
-
-######################################################################
-
+pandas==0.25.3
 mittens>=0.1
+torch==1.3.1
+regex==2019.11.1
+requests==2.22.0
+tqdm==4.38.0
 
-######################################################################
-# For NLTK, the data distibution needs to be downloaded separately:
-#
-# https://www.nltk.org/data.html
-
-######################################################################
-# PyTorch is required. For installation instructions, see MISSING
-#
-# If you're using Anaconda, we suggest
-#
-# conda install pytorch torchvision -c pytorch
-
-######################################################################
-# Tensorflow is very helpful for using `mittens`. If TensorFlow is not
-# available, then `mittens` will resort to pure NumPy, which is much
-# slower. Tensorflow should be installed via the instructions
-# provided by the TensorFlow team, which depend on your computing
-# environment:
-#
-# https://www.tensorflow.org/install/
+imbalanced-learn==0.5.0
