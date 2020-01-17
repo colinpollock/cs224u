@@ -3,31 +3,32 @@
 Some of this is redundant with the code Chris wrote, but I wanted to go through it myself.
 """
 
-import os
 import itertools
+import os
 from collections import Counter
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.optim import Adam
-
 from torch.nn.utils.rnn import pad_sequence
-
+from torch.optim import Adam
 from torch.utils.data import DataLoader, TensorDataset
 from torchtext import vocab
 from torchtext.data import get_tokenizer
-
-from sklearn.metrics import classification_report, f1_score
-
-
-
-import numpy as np
+from sklearn.metrics import classification_report
+from imblearn.over_sampling import RandomOverSampler
 
 import sst
 
+
 SST_HOME = os.path.join('data', 'trees')
 UNK = '$UNK'
+
+
+_tokenizer = get_tokenizer('basic_english')
+def tokenize(text):
+    return _tokenizer(text)
 
 
 def load_raw_data(train_or_dev):    
@@ -46,9 +47,9 @@ def load_raw_data(train_or_dev):
     return texts, labels
 
 
-
-
 class RnnClassifier(nn.Module):
+    """RNN model (RNN, LSTM, or GRU) that is fit on text and labels.
+    """
     GLOVE_DIM = 100
 
     def __init__(
@@ -61,14 +62,17 @@ class RnnClassifier(nn.Module):
         print_every=1,
         bidirectional=False,
         update_glove=False,
+        oversample=True,
+        use_all_states=True,
     ):
         super(RnnClassifier, self).__init__()
 
-        self.tokenize = get_tokenizer('basic_english')
-
+        self.rnn_type = rnn_type
         self.batch_size = batch_size
         self.epochs = epochs
         self.print_every = print_every
+        self.oversample = oversample
+        self.use_all_states = use_all_states
 
         self.glove = vocab.GloVe(name='6B', dim=self.GLOVE_DIM)
         vocab_size, embedding_dimension = self.glove.vectors.shape
@@ -93,15 +97,29 @@ class RnnClassifier(nn.Module):
         self.linear = nn.Linear(classifier_dimension, num_classes)
         
     def forward(self, inputs):
-        # dense layer off of the final one
+        """Forward through layers:
+        * embedding
+        * RNN
+        * dense layer over MEOW
+        """
         embedded = self.embedding(inputs)
-        output, hidden_states = self.rnn(embedded)
-        
-        # Output is of shape (batch, num_layers, hidden_dimension). num_layers is only
-        # 1 so we can select it. We want the final output for all batches.
-        # Index 1 of `0` is 
-        final_output = output[:, 0, :]
-        densed = self.linear(final_output)
+        output, state = self.rnn(embedded)
+
+        # For GRU and LSM the state contains the cell state
+        if self.rnn_type != 'rnn':
+            state = state[0]
+
+        state = state.squeeze()
+
+        # Note that Potts used state instead of output. output contains the
+        # hidden state for each time step (see the URL below).
+        # https://stackoverflow.com/questions/48302810/whats-the-difference-between-hidden-and-output-in-pytorch-lstm)
+        if self.use_all_states:
+            state_to_use = output.mean(dim=1)
+        else:
+            state_to_use = state
+
+        densed = self.linear(state_to_use)
         return densed
         
 
@@ -130,9 +148,9 @@ class RnnClassifier(nn.Module):
             total = correct = 0
             for inputs, labels in data_loader:
                 outputs = self(inputs)
+                loss = criterion(outputs, labels)
 
                 optimizer.zero_grad()
-                loss = criterion(outputs, labels)
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item()
@@ -148,10 +166,17 @@ class RnnClassifier(nn.Module):
 
     def build_loader(self, texts, labels):
         token_ids_for_each_text = [self.featurize(text) for text in texts]
-        padded = pad_sequence(token_ids_for_each_text, batch_first=True)
-        inputs_tensor = padded
+        padded_np = pad_sequence(token_ids_for_each_text, batch_first=True).numpy()
+        labels_np = np.array([self.label_to_id[label] for label in labels])
 
-        labels_tensor = torch.LongTensor([self.label_to_id[label] for label in labels])
+        # TODO: use Torch's `WeightedRandomSampler` so that I don't have to
+        # convert to and back from numpy.
+        if self.oversample is True:
+            oversampler = RandomOverSampler()
+            padded_np, labels_np = oversampler.fit_resample(padded_np, labels_np)
+
+        inputs_tensor = torch.LongTensor(padded_np)
+        labels_tensor = torch.LongTensor(labels_np)
         dataset = TensorDataset(inputs_tensor, labels_tensor)
 
         return DataLoader(
@@ -173,7 +198,7 @@ class RnnClassifier(nn.Module):
 
 
     def featurize(self, text):
-        tokens = self.tokenize(text)
+        tokens = tokenize(text)
         lookup = self.glove.stoi
 
         # I'm ignoring tokens that aren't in the vocabulary
@@ -201,8 +226,6 @@ class GloveClassifier(nn.Module):
 
     def __init__(self, hidden_dim=10, num_classes=3, epochs=10, batch_size=128, print_every=1, update_glove=True):
         super(GloveClassifier, self).__init__()
-
-        self.tokenize = get_tokenizer('basic_english')
 
         # These are better as `fit` parameters, but this makes running experiments
         # easier.
@@ -297,7 +320,7 @@ class GloveClassifier(nn.Module):
 
 
     def featurize(self, text):
-        tokens = self.tokenize(text)
+        tokens = tokenize(text)
         lookup = self.glove.stoi
 
         # I'm ignoring tokens that aren't in the vocabulary
@@ -309,7 +332,6 @@ class BOWClassifier(nn.Module):
     def __init__(self, word_to_id, label_to_id, batch_size=32, l2_strength=0, epochs=1):
         super(BOWClassifier, self).__init__()
 
-        self.tokenize = get_tokenizer('basic_english')
 
         self.batch_size = batch_size
         self.word_to_id = word_to_id
@@ -375,7 +397,7 @@ class BOWClassifier(nn.Module):
         unk_id = self.word_to_id[UNK]
 
         input_ = torch.zeros(self.vocab_size)
-        for word in self.tokenize(text):
+        for word in tokenize(text):
             word_id = self.word_to_id.get(word, unk_id)
             input_[word_id] += 1
 
@@ -393,14 +415,13 @@ class BOWClassifier(nn.Module):
             pin_memory=True
         )
 
-
-    @classmethod
-    def get_words(cls, texts, min_count, max_freq, top_n):
+    @staticmethod
+    def get_words(texts, min_count, max_freq, top_n):
         word_counts = Counter()
         doc_counts = Counter()
         for text in texts:
             seen_words = set()
-            for word in cls.tokenize(text):
+            for word in tokenize(text):
                 word_counts[word] += 1
                 if word not in seen_words:
                     doc_counts[word] += 1
